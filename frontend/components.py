@@ -50,20 +50,21 @@ def allergen_badge_html(severity: str) -> str:
 
 def render_health_score(score_data: Dict[str, Any]) -> None:
     """Renders the real-time computed health score card."""
-    score     = score_data.get("score", 50)
-    grade     = score_data.get("grade", "B")
-    label     = score_data.get("grade_label", "Acceptable")
-    color     = score_data.get("color", "#22D3EE")
-    bg        = score_data.get("bg", "rgba(34,211,238,0.12)")
-    border    = score_data.get("border", "rgba(34,211,238,0.45)")
-    summary   = score_data.get("summary", "")
-    note      = score_data.get("note", "")
+    score = score_data.get("score")
+    grade = score_data.get("grade") or "N/A"
+    label = score_data.get("grade_label") or "Insufficient Data"
+    color = score_data.get("color") or "#94A3B8"
+    bg = score_data.get("bg") or "rgba(100,116,139,0.12)"
+    border = score_data.get("border") or "rgba(100,116,139,0.35)"
+    summary = score_data.get("summary", "")
+    note = score_data.get("note", "")
     components = score_data.get("components", [])
-    detected  = score_data.get("detected_count", 0)
-    total     = score_data.get("total_count", 6)
+    detected = score_data.get("detected_count", 0)
+    total = score_data.get("total_count", 6)
 
     # Score progress bar fill width
-    bar_pct = min(100, max(0, score))
+    score_display = str(score) if score is not None else "—"
+    bar_pct = min(100, max(0, score)) if score is not None else 0
 
     st.markdown(f"""
 <div style="background:{bg}; border:1px solid {border};
@@ -78,14 +79,14 @@ border-radius:18px; padding:26px 30px; margin-bottom:24px;">
            display:flex; flex-direction:column; align-items:center; justify-content:center;
            box-shadow:0 0 24px {border}; flex-shrink:0;">
         <div style="font-family:'Space Grotesk',sans-serif; font-size:1.6rem; font-weight:800;
-             color:#FFFFFF; line-height:1;">{score}</div>
+             color:#FFFFFF; line-height:1;">{score_display}</div>
         <div style="font-family:'JetBrains Mono',monospace; font-size:0.6rem; color:{color};
              letter-spacing:0.05em;">/100</div>
       </div>
       <div>
         <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
           <span style="font-family:'Space Grotesk',sans-serif; font-size:1.5rem;
-               font-weight:800; color:{color};">Grade {grade}</span>
+               font-weight:800; color:{color};">{'Grade ' + grade if grade != 'N/A' else 'Rating Unavailable'}</span>
           <span style="font-family:'JetBrains Mono',monospace; font-size:0.75rem;
                background:{bg}; border:1px solid {border}; color:{color};
                padding:3px 10px; border-radius:999px;">{label}</span>
@@ -105,7 +106,7 @@ border-radius:18px; padding:26px 30px; margin-bottom:24px;">
         HEALTH SCORE
       </span>
       <span style="font-family:'JetBrains Mono',monospace; font-size:0.7rem; color:{color};">
-        {score}/100
+        {score_display}/100
       </span>
     </div>
     <div style="height:8px; background:rgba(255,255,255,0.08); border-radius:999px; overflow:hidden;">
@@ -124,14 +125,19 @@ border-radius:18px; padding:26px 30px; margin-bottom:24px;">
     with st.expander("📊 Score Component Breakdown", expanded=False):
         cols = st.columns(3)
         for i, comp in enumerate(components):
-            detected_tag = "" if comp["detected"] else " (not detected — neutral 50)"
+            detected_tag = "" if comp["detected"] else " (not detected)"
             direction_icon = "📉" if comp["direction"] == "penalty" else "📈"
             col_score = comp["component_score"]
-            col_color = (
-                "#F87171" if col_score <= 30 else
-                "#FBBF24" if col_score <= 60 else
-                "#34D399"
-            )
+            if col_score is None:
+                col_display = "N/A"
+                col_color = "#64748B"
+            else:
+                col_display = str(col_score)
+                col_color = (
+                    "#F87171" if col_score <= 30 else
+                    "#FBBF24" if col_score <= 60 else
+                    "#34D399"
+                )
             with cols[i % 3]:
                 st.markdown(f"""
 <div style="background:rgba(17,26,43,0.6); border:1px solid rgba(255,255,255,0.06);
@@ -141,7 +147,7 @@ border-radius:10px; padding:12px; margin-bottom:10px; text-align:center;">
     {direction_icon} {comp['nutrient']}
   </div>
   <div style="font-size:1.3rem; font-weight:700; color:{col_color};
-       font-family:'Space Grotesk',sans-serif;">{col_score}</div>
+       font-family:'Space Grotesk',sans-serif;">{col_display}</div>
   <div style="font-size:0.68rem; color:#64748B;">weight {comp['weight']}%{detected_tag}</div>
 </div>
 """, unsafe_allow_html=True)

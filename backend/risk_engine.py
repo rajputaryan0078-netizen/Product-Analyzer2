@@ -24,6 +24,7 @@ DISCLAIMER: All outputs are educational / informational.
 This engine does not diagnose, prescribe, or make medical recommendations.
 """
 
+import re
 from typing import Dict, Any, List, Optional
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -432,6 +433,16 @@ def evaluate_quantitative_alerts(
         raw_unit = (data.get("unit") or "").strip().lower()
         raw_basis = data.get("serving_basis") or ""
 
+        # ── Handle Sodium fallback from Salt if Sodium was not detected ───
+        if raw_value is None and nutrient_name == "Sodium":
+            salt_data = nutrients.get("Salt", {})
+            salt_val = salt_data.get("value")
+            if salt_val is not None:
+                # 1g salt ≈ 400mg sodium -> salt_g * 400 = sodium_mg
+                raw_value = (salt_val / 2.5) * 1000.0
+                raw_unit = "mg"
+                raw_basis = salt_data.get("serving_basis") or "per 100g"
+
         # ── UNKNOWN: value not extracted ─────────────────────────────────────
         if raw_value is None:
             alerts.append({
@@ -502,7 +513,11 @@ def evaluate_quantitative_alerts(
 
         # Format display value
         disp_unit = rule["display_unit"].split()[0]  # just "g" or "mg"
-        value_display = f"{effective_value} {disp_unit} per 100g"
+        if isinstance(effective_value, float) and not effective_value.is_integer():
+            disp_val = f"{effective_value:.1f}"
+        else:
+            disp_val = f"{int(effective_value)}"
+        value_display = f"{disp_val} {disp_unit} per 100g"
 
         alerts.append({
             "nutrient": nutrient_name,
@@ -540,17 +555,9 @@ def _threshold_text(rule: Dict[str, Any]) -> str:
 
 def evaluate_ingredient_flags(raw_ingredients_text: str) -> List[Dict[str, Any]]:
     """
-    Scans raw ingredients text for flagged terms.
-    Returns only flags where at least one search term is found in the text.
+    Scans raw ingredients text for flagged terms using word boundaries.
+    Returns only flags where at least one search term is found as a whole word/phrase.
     Does NOT raise flags for terms absent from the text.
-
-    Returns a list of flag dicts:
-      name         : str   (flag name)
-      found_terms  : list  (actual matching terms found in text)
-      category     : str
-      severity     : "high" | "moderate" | "info"
-      note         : str
-      suggestion   : str
     """
     if not raw_ingredients_text or not raw_ingredients_text.strip():
         return []
@@ -559,10 +566,12 @@ def evaluate_ingredient_flags(raw_ingredients_text: str) -> List[Dict[str, Any]]
     raised_flags = []
 
     for flag in INGREDIENT_FLAGS:
-        found = [
-            term for term in flag["search_terms"]
-            if term.lower() in text_lower
-        ]
+        found = []
+        for term in flag["search_terms"]:
+            pattern = rf'\b{re.escape(term.lower())}\b'
+            if re.search(pattern, text_lower):
+                found.append(term)
+
         if found:
             raised_flags.append({
                 "name": flag["name"],

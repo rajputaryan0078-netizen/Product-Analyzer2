@@ -114,18 +114,24 @@ def _run_full_pipeline(raw_text: str, raw_ocr_text: str, is_demo: bool = False) 
     Runs the complete analysis pipeline on extracted OCR text.
     Returns the full results dict stored in session_state["analysis_results"].
     """
-    fields          = extractor.extract_product_fields(raw_text)
+    classification  = ocr_utils.classify_content_type(raw_text)
+    fields          = extractor.extract_product_fields(raw_text, classification)
     nutrients       = extractor.extract_nutrition_values(raw_text)
     risk_analysis   = risk_engine.run_full_risk_analysis(
         nutrients, fields.get("ingredients")
     )
-    allergen_result = allergen_engine.detect_allergens(fields.get("ingredients"))
+    allergen_result = allergen_engine.detect_allergens(
+        fields.get("ingredients"),
+        fields.get("declared_allergens"),
+        fields.get("precautionary_allergens"),
+    )
     score_data      = hs_module.compute_health_score(nutrients)
 
     return {
         "is_demo":          is_demo,
         "raw_text":         raw_text,
         "raw_ocr_text":     raw_ocr_text,
+        "classification":   classification,
         "fields":           fields,
         "nutrients":        nutrients,
         "risk_analysis":    risk_analysis,
@@ -393,13 +399,13 @@ Drop your product into the scanner. We'll extract the details that matter.
 <div style="font-family:'Space Grotesk',sans-serif; font-size:1.3rem; font-weight:700;
 color:#FFFFFF; margin-bottom:6px;">Drop Product Image Here</div>
 <div style="font-size:0.86rem; color:#9AA7B5; max-width:380px; margin:0 auto 16px auto;">
-Supports JPG, JPEG, and PNG packet labels up to 10MB.
+Supports JPG, JPEG, PNG, and WebP packet labels up to 15MB.
 </div>
 </div>""", unsafe_allow_html=True)
 
         new_file = st.file_uploader(
             "CHOOSE PRODUCT IMAGE",
-            type=["jpg", "jpeg", "png"],
+            type=["jpg", "jpeg", "png", "webp"],
             key="chamber_uploader",
             label_visibility="collapsed",
         )
@@ -537,6 +543,23 @@ def render_screen_3_results():
     p_ing     = fields.get("ingredients")  or "Not detected"
     p_serving = fields.get("serving_size") or "Not detected"
     name_detected = bool(fields.get("product_name"))
+    classification = results.get("classification", {})
+
+    if classification.get("content_type") == "recipe":
+        st.markdown("""<div style="background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.35);
+border-radius:14px; padding:16px 20px; margin-bottom:18px;">
+<div style="display:flex; align-items:center; gap:10px;">
+<span style="font-size:1.4rem;">🍳</span>
+<div>
+<div style="font-family:'Space Grotesk',sans-serif; font-size:1.05rem; font-weight:700; color:#FDE68A;">
+Recipe Document Identified
+</div>
+<div style="font-size:0.86rem; color:#CBD5E1; margin-top:2px; line-height:1.5;">
+This image was identified as culinary recipe instructions rather than commercial packaged food. Commercial packaging fields (brand, MRP, manufacturing and expiry dates) are not applicable.
+</div>
+</div>
+</div>
+</div>""", unsafe_allow_html=True)
 
     # ── Hero card ─────────────────────────────────────────────────────────────
     st.markdown(f"""<div class="results-hero-card">

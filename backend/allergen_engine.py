@@ -1,24 +1,28 @@
 """
 Allergen Detection Engine — VEDANSHU Product Packet Analyser.
 
-Scans extracted ingredients text for common allergens defined by
-food safety regulations (FSSAI, EU FIC Regulation 1169/2011, FDA FALCPA).
+Scans extracted ingredients and packaging declarations for allergens defined by
+major food safety regulations (FSSAI, EU FIC 1169/2011, US FDA FALCPA).
 
-Allergen categories monitored (13 total):
-  Gluten · Milk/Dairy · Peanuts · Tree Nuts · Soy · Eggs · Fish ·
-  Crustaceans · Sesame · Mustard · Sulphites · Celery · Molluscs
-
-DISCLAIMER: Allergen detection is based on keyword matching in OCR text.
-It is NOT a substitute for reading the actual product label.
-False negatives are possible due to OCR errors or unusual label formats.
+KEY REQUIREMENTS:
+-----------------
+1. Regex word-boundary matching:
+   Strict `\\b` word boundaries prevent false substring positives (e.g. "oat" matching
+   "chocolate", "nut" matching "minute", "pea" matching "peanut", "egg" matching "veggie").
+2. Separate declared ingredients from precautionary statements:
+   Distinguishes explicit ingredients ("CONTAINS") from cross-contamination warnings ("MAY CONTAIN").
+3. Explicit 4-state reporting:
+   - CONTAINS
+   - MAY_CONTAIN
+   - NOT_DETECTED
+   - UNKNOWN (when ingredients text is absent/unreadable)
+4. Never assume allergen absence:
+   Absence of a keyword in OCR is never presented as a guarantee of allergen absence.
 """
 
+import re
 from typing import Dict, Any, List, Optional
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Allergen Database
-# ─────────────────────────────────────────────────────────────────────────────
 
 ALLERGEN_DATABASE: List[Dict[str, Any]] = [
     {
@@ -29,13 +33,12 @@ ALLERGEN_DATABASE: List[Dict[str, Any]] = [
             "wheat", "wheat flour", "refined wheat flour", "maida",
             "whole wheat", "durum", "semolina", "sooji", "suji", "rava",
             "barley", "rye", "oats", "oat", "spelt", "triticale",
-            "gluten", "seitan",
+            "gluten", "seitan", "malt",
         ],
         "severity": "high",
         "note": (
-            "May cause adverse reactions in people with celiac disease "
-            "or non-celiac gluten sensitivity. Wheat is one of the most "
-            "common food allergens globally."
+            "Wheat/gluten is one of the most common allergens. Individuals with "
+            "celiac disease or gluten sensitivity must avoid gluten-containing cereals."
         ),
     },
     {
@@ -47,17 +50,17 @@ ALLERGEN_DATABASE: List[Dict[str, Any]] = [
             "whole milk", "cream", "butter", "ghee", "cheese",
             "paneer", "curd", "yogurt", "yoghurt", "whey",
             "whey protein", "casein", "caseinate", "lactose",
-            "lactalbumin", "buttermilk",
+            "lactalbumin", "buttermilk", "dairy",
         ],
         "severity": "high",
         "note": (
-            "Contains lactose and milk proteins (casein, whey). "
-            "Avoid if lactose intolerant or have a cow's milk protein allergy."
+            "Contains milk proteins (casein, whey) and lactose. "
+            "Relevant for both cow's milk protein allergy and lactose intolerance."
         ),
     },
     {
-        "name": "Peanuts / Groundnuts",
-        "category": "Peanuts",
+        "name": "Peanuts",
+        "category": "Peanuts & Groundnuts",
         "icon": "🥜",
         "search_terms": [
             "peanut", "peanuts", "groundnut", "groundnuts",
@@ -66,9 +69,8 @@ ALLERGEN_DATABASE: List[Dict[str, Any]] = [
         ],
         "severity": "high",
         "note": (
-            "One of the most common food allergens. Can cause severe "
-            "anaphylaxis in allergic individuals. Even trace amounts "
-            "may trigger reactions."
+            "Peanuts are a potent allergen capable of causing severe anaphylaxis. "
+            "Distinct from tree nuts (peanuts are legumes)."
         ),
     },
     {
@@ -84,8 +86,8 @@ ALLERGEN_DATABASE: List[Dict[str, Any]] = [
         ],
         "severity": "high",
         "note": (
-            "Tree nut allergies are common and can be severe. "
-            "Cross-reactivity between different tree nuts is possible."
+            "Tree nut allergies can be severe. Cross-reactivity between "
+            "different botanical tree nuts is common."
         ),
     },
     {
@@ -100,9 +102,8 @@ ALLERGEN_DATABASE: List[Dict[str, Any]] = [
         ],
         "severity": "moderate",
         "note": (
-            "Soy is a common allergen. Soy lecithin (emulsifier INS 322) "
-            "is widely used in processed foods and may trigger reactions "
-            "in highly sensitive individuals."
+            "Soy is commonly used in emulsifiers (INS 322 / soy lecithin) and "
+            "protein isolates across processed foods."
         ),
     },
     {
@@ -115,10 +116,7 @@ ALLERGEN_DATABASE: List[Dict[str, Any]] = [
             "lysozyme", "mayonnaise", "meringue",
         ],
         "severity": "high",
-        "note": (
-            "Egg allergy is common especially in children. Eggs may be "
-            "present in baked goods, sauces, and confectionery."
-        ),
+        "note": "Common trigger in baked goods, confectionery, and sauces.",
     },
     {
         "name": "Fish",
@@ -130,10 +128,7 @@ ALLERGEN_DATABASE: List[Dict[str, Any]] = [
             "fish sauce", "fish oil", "fish extract",
         ],
         "severity": "high",
-        "note": (
-            "Fish allergy can cause severe reactions. Fish sauce and "
-            "extracts may be hidden in Asian sauces and seasonings."
-        ),
+        "note": "Can trigger severe reactions. Often found in savory sauces and gelatin.",
     },
     {
         "name": "Crustaceans",
@@ -144,10 +139,7 @@ ALLERGEN_DATABASE: List[Dict[str, Any]] = [
             "crayfish", "crawfish", "crustacean", "shellfish",
         ],
         "severity": "high",
-        "note": (
-            "Shellfish/crustacean allergy can cause severe anaphylaxis. "
-            "One of the most common adult-onset food allergies."
-        ),
+        "note": "Shellfish allergen (tropomyosin protein). High risk of severe allergic response.",
     },
     {
         "name": "Sesame",
@@ -158,10 +150,7 @@ ALLERGEN_DATABASE: List[Dict[str, Any]] = [
             "gingelly oil", "til oil",
         ],
         "severity": "moderate",
-        "note": (
-            "Sesame allergy is increasingly recognized worldwide. "
-            "Common in Indian and Middle Eastern foods."
-        ),
+        "note": "Common in Indian, Middle Eastern, and Asian foods.",
     },
     {
         "name": "Mustard",
@@ -169,31 +158,23 @@ ALLERGEN_DATABASE: List[Dict[str, Any]] = [
         "icon": "🟡",
         "search_terms": [
             "mustard", "mustard seed", "mustard oil",
-            "mustard powder", "mustard flour",
+            "mustard powder", "mustard flour", "sarson",
         ],
         "severity": "moderate",
-        "note": (
-            "Mustard allergy is more common in Europe and India. "
-            "Mustard oil is a major cooking oil in parts of India."
-        ),
+        "note": "Widely used in Indian culinary preparations and European condiments.",
     },
     {
         "name": "Sulphites",
-        "category": "Preservative Allergen",
+        "category": "Preservatives",
         "icon": "⚗️",
         "search_terms": [
             "sulphite", "sulfite", "sulphur dioxide", "sulfur dioxide",
             "metabisulphite", "metabisulfite", "sodium sulphite",
             "sodium sulfite", "so2", "ins 220", "ins 221",
-            "ins 222", "ins 223", "ins 224", "ins 225",
-            "ins 228", "e220", "e221", "e222", "e223", "e224",
+            "ins 222", "ins 223", "ins 224", "e220", "e221", "e222", "e223", "e224",
         ],
         "severity": "moderate",
-        "note": (
-            "Sulphites can trigger asthma attacks and allergic reactions "
-            "in sensitive individuals. Common in dried fruits, wine, "
-            "and preserved foods."
-        ),
+        "note": "Can trigger bronchospasm and asthma exacerbations in sensitive individuals.",
     },
     {
         "name": "Celery",
@@ -203,10 +184,7 @@ ALLERGEN_DATABASE: List[Dict[str, Any]] = [
             "celery", "celeriac", "celery salt", "celery seed",
         ],
         "severity": "info",
-        "note": (
-            "Celery allergy is recognized in EU food law. Can cause "
-            "reactions ranging from mild oral symptoms to severe anaphylaxis."
-        ),
+        "note": "Mandatory allergen disclosure under EU regulations.",
     },
     {
         "name": "Molluscs",
@@ -218,69 +196,135 @@ ALLERGEN_DATABASE: List[Dict[str, Any]] = [
             "snail", "mollusc", "mollusk",
         ],
         "severity": "moderate",
-        "note": (
-            "Mollusc allergy is related to but distinct from crustacean "
-            "allergy. Cross-reactivity is possible."
-        ),
+        "note": "Distinct class of shellfish allergy.",
     },
 ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Detection function
-# ─────────────────────────────────────────────────────────────────────────────
-
-def detect_allergens(raw_ingredients_text: Optional[str]) -> Dict[str, Any]:
+def _match_terms_with_word_boundary(text: str, terms: List[str]) -> List[str]:
     """
-    Scans ingredients text for allergen keywords.
+    Finds exact word-boundary matches for terms in text.
+    Prevents false substring matches like 'oat' in 'chocolate' or 'nut' in 'minute'.
+    """
+    matched = []
+    for term in terms:
+        # Require word boundary on both sides
+        pattern = rf'\b{re.escape(term.lower())}\b'
+        if re.search(pattern, text):
+            matched.append(term)
+    return matched
 
-    Only flags allergens when search terms are actually found in the text.
-    Never assumes or invents allergens.
+
+def detect_allergens(
+    raw_ingredients_text: Optional[str],
+    declared_statements: Optional[str] = None,
+    precautionary_statements: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Scans ingredients and package statements for allergens.
+    Distinguishes direct inclusion (CONTAINS) from precautionary warnings (MAY_CONTAIN).
 
     Returns:
       {
-        "allergens_found": [...],     list of detected allergen dicts
-        "allergens_clear": [...],     list of allergen names NOT found
+        "allergens_found": [...],          # Combined for frontend rendering
+        "allergens_clear": [...],          # Unfound allergens (checked in text)
+        "declared_allergens": [...],       # Directly in ingredients/contains
+        "precautionary_allergens": [...],  # In "may contain" / facility warnings
         "has_allergens": bool,
         "ingredients_available": bool,
         "total_checked": int,
         "total_found": int,
+        "status": "detected" | "not_detected" | "unknown",
+        "disclaimer": str,
       }
     """
+    total_checked = len(ALLERGEN_DATABASE)
+
     result: Dict[str, Any] = {
         "allergens_found": [],
         "allergens_clear": [],
+        "declared_allergens": [],
+        "precautionary_allergens": [],
         "has_allergens": False,
         "ingredients_available": False,
-        "total_checked": len(ALLERGEN_DATABASE),
+        "total_checked": total_checked,
         "total_found": 0,
+        "status": "unknown",
+        "disclaimer": (
+            "Absence of evidence is not evidence of absence. Allergen detection relies "
+            "on keyword matching from OCR text. Always verify against the physical package."
+        ),
     }
 
-    if not raw_ingredients_text or not raw_ingredients_text.strip():
+    # Combined corpus
+    has_text = bool(
+        (raw_ingredients_text and raw_ingredients_text.strip()) or
+        (declared_statements and declared_statements.strip()) or
+        (precautionary_statements and precautionary_statements.strip())
+    )
+
+    if not has_text:
+        result["status"] = "unknown"
+        result["allergens_clear"] = []  # Do not declare clean when text is missing!
         return result
 
     result["ingredients_available"] = True
-    text_lower = raw_ingredients_text.lower()
+
+    ing_corpus = (raw_ingredients_text or "").lower()
+    decl_corpus = (declared_statements or "").lower()
+    prec_corpus = (precautionary_statements or "").lower()
+
+    # Also detect inline "may contain" within ingredients text if present
+    inline_prec = ""
+    may_match = re.search(r'\b(?:may\s+contain|manufactured\s+in|processed\s+in)\b.*', ing_corpus)
+    if may_match:
+        inline_prec = may_match.group(0)
+        # Strip precautionary tail from primary ingredient text
+        ing_corpus = ing_corpus[:may_match.start()]
+
+    full_prec_corpus = f"{prec_corpus} {inline_prec}".strip()
+    primary_corpus = f"{ing_corpus} {decl_corpus}".strip()
 
     for allergen in ALLERGEN_DATABASE:
-        found_terms = [
-            term for term in allergen["search_terms"]
-            if term.lower() in text_lower
-        ]
+        terms = allergen["search_terms"]
 
-        if found_terms:
-            result["allergens_found"].append({
+        # 1. Check primary ingredients / declared "contains"
+        found_primary = _match_terms_with_word_boundary(primary_corpus, terms)
+
+        # 2. Check precautionary statements ("may contain")
+        found_precautionary = _match_terms_with_word_boundary(full_prec_corpus, terms)
+
+        if found_primary:
+            entry = {
                 "name": allergen["name"],
                 "category": allergen["category"],
                 "icon": allergen["icon"],
-                "found_terms": found_terms,
+                "found_terms": found_primary,
                 "severity": allergen["severity"],
+                "type": "CONTAINS",
+                "status_label": "Contains (Ingredient)",
                 "note": allergen["note"],
-            })
+            }
+            result["declared_allergens"].append(entry)
+            result["allergens_found"].append(entry)
+        elif found_precautionary:
+            entry = {
+                "name": allergen["name"],
+                "category": allergen["category"],
+                "icon": allergen["icon"],
+                "found_terms": found_precautionary,
+                "severity": "moderate" if allergen["severity"] == "high" else "info",
+                "type": "MAY_CONTAIN",
+                "status_label": "May Contain (Cross-contact Risk)",
+                "note": f"Precautionary statement on packaging: May contain {', '.join(found_precautionary)}.",
+            }
+            result["precautionary_allergens"].append(entry)
+            result["allergens_found"].append(entry)
         else:
             result["allergens_clear"].append(allergen["name"])
 
     result["total_found"] = len(result["allergens_found"])
     result["has_allergens"] = result["total_found"] > 0
+    result["status"] = "detected" if result["has_allergens"] else "not_detected"
 
     return result

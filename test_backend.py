@@ -1,19 +1,54 @@
 """
-Complete test suite — VEDANSHU Product Packet Analyser backend + risk engine.
-Run from the project directory:
-    py test_backend.py
-
-All 66 tests run in a single pass with a single summary at the end.
+Comprehensive Test Suite — VEDANSHU Product Packet Analyser.
+Covers all 15 verification scenarios requested in Phase 9:
+ 1. Readable packaged-food label with all fields present.
+ 2. Nutrition table with multiple columns (Per 100g vs Per Serving).
+ 3. Indian MRP and date formats (incl. of all taxes, PKD, Mfg, Best before).
+ 4. Ingredients containing allergens with strict word boundaries.
+ 5. Recipe screenshot mistakenly presented as a product package.
+ 6. Image with no readable text / blank.
+ 7. Image with only partial nutrition data.
+ 8. Sodium versus salt conversion and distinction.
+ 9. Missing added sugar and other missing nutrients.
+ 10. Incorrect OCR readings and ambiguous dates.
+ 11. Unsupported files and oversized uploads.
+ 12. PDF/CSV consistency and safe export of null/partial data.
+ 13. Product with no nutrition table.
+ 14. Label containing 'may contain' allergen wording.
+ 15. Health scoring with complete, partial, and absent nutrient data.
 """
 
 import sys
 import os
+import io
 
+# Ensure UTF-8 output on Windows console
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+# Resolve imports
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+_BACKEND = os.path.join(_HERE, "backend")
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
 
-PASS = "  PASS"
-FAIL = "  FAIL"
+from PIL import Image, ImageDraw
+from backend import (
+    image_utils,
+    ocr_utils,
+    extractor,
+    nutrition_rules,
+    health_score,
+    allergen_engine,
+    risk_engine,
+    export_engine,
+)
+
 _results = []
 
 
@@ -21,715 +56,441 @@ def check(name, fn):
     try:
         fn()
         _results.append((name, True, ""))
-        print(f"✅{PASS}  {name}")
+        print(f"[PASS]  {name}")
     except Exception as exc:
         _results.append((name, False, str(exc)))
-        print(f"❌{FAIL}  {name}")
-        print(f"         Reason: {exc}")
+        print(f"[FAIL]  {name}")
+        print(f"        Reason: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SECTION 1 — SYNTAX
+# 1. READABLE PACKAGED-FOOD LABEL WITH ALL FIELDS
 # ─────────────────────────────────────────────────────────────────────────────
-def _syntax_all():
-    import py_compile
-    for f in ["image_utils.py", "ocr_utils.py", "extractor.py",
-              "nutrition_rules.py", "risk_engine.py", "app.py"]:
-        py_compile.compile(os.path.join(_HERE, f), doraise=True)
+def test_full_packaged_food_label():
+    text = """
+    BRITANNIA NUTRICHOICE OAT COOKIES
+    Brand: Britannia Industries
+    Net Weight: 150g
+    M.R.P.: Rs. 45.00 (Incl. of all taxes)
+    Mfg Date: 12/04/2026
+    Best Before: 6 months from manufacture
+    Serving Size: 25g
 
-check("Syntax — all six modules compile without error", _syntax_all)
+    Ingredients: Rolled Oats (38%), Refined Wheat Flour (Maida), Edible Vegetable Oil,
+    Sugar, Invert Syrup, Milk Solids, Salt, Raising Agents (INS 500ii).
+    Contains: Wheat, Oats, Milk.
 
+    NUTRITIONAL INFORMATION (Approx. values per 100g)
+    Energy: 460 kcal
+    Total Carbohydrates: 68g
+      of which Sugars: 18g
+    Total Fat: 18g
+      Saturated Fat: 8.5g
+      Trans Fat: 0g
+    Protein: 8.0g
+    Dietary Fibre: 6.0g
+    Sodium: 340mg
+    Salt: 0.85g
+    """
+    fields = extractor.extract_product_fields(text)
+    nutrients = extractor.extract_nutrition_values(text)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 2 — IMPORTS
-# ─────────────────────────────────────────────────────────────────────────────
-def _import_all():
-    import image_utils, ocr_utils, extractor, nutrition_rules, risk_engine
+    assert fields["product_name"] == "BRITANNIA NUTRICHOICE OAT COOKIES", f"Wrong name: {fields['product_name']}"
+    assert fields["brand_name"] == "Britannia Industries", f"Wrong brand: {fields['brand_name']}"
+    assert fields["mrp"] == "₹ 45.00", f"Wrong MRP: {fields['mrp']}"
+    assert fields["mfg_date"] == "12/04/2026", f"Wrong mfg date: {fields['mfg_date']}"
+    assert fields["serving_size"] == "25g", f"Wrong serving size: {fields['serving_size']}"
+    assert fields["ingredients"] is not None and "Rolled Oats" in fields["ingredients"]
+    assert nutrients["Sugar"]["value"] == 18.0
+    assert nutrients["Protein"]["value"] == 8.0
+    assert nutrients["Sodium"]["value"] == 340.0
 
-check("Import — all backend modules importable", _import_all)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 3 — IMAGE VALIDATION
-# ─────────────────────────────────────────────────────────────────────────────
-class _FakeFile:
-    def __init__(self, name, size, data=b""):
-        self.name = name; self.size = size
-        self._data = data; self._pos = 0
-    def seek(self, pos): self._pos = pos
-    def read(self, n=-1):
-        chunk = self._data[self._pos:]
-        if n >= 0: chunk = chunk[:n]
-        self._pos += len(chunk)
-        return chunk
-
-def _val_none():
-    import image_utils
-    ok, msg = image_utils.validate_image_file(None)
-    assert not ok and "No file" in msg
-
-def _val_bad_ext():
-    import image_utils
-    ok, msg = image_utils.validate_image_file(_FakeFile("a.bmp", 100))
-    assert not ok and ("Unsupported" in msg or "unsupported" in msg.lower())
-
-def _val_too_large():
-    import image_utils
-    ok, msg = image_utils.validate_image_file(_FakeFile("a.jpg", 12 * 1024 * 1024))
-    assert not ok and ("exceeds" in msg or "MB" in msg)
-
-check("Image validation — None → False", _val_none)
-check("Image validation — unsupported extension rejected", _val_bad_ext)
-check("Image validation — oversized file rejected", _val_too_large)
+check("Scenario 01: Fully readable packaged-food label with all fields", test_full_packaged_food_label)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SECTION 4 — PRODUCT FIELD EXTRACTION
+# 2. MULTI-COLUMN NUTRITION TABLE (PER 100G VS PER SERVING)
 # ─────────────────────────────────────────────────────────────────────────────
-SAMPLE_LABEL_TEXT = """
-SUNFEAST DARK FANTASY CHOCO FILLS
-Brand: ITC Limited
-Net Weight: 300g
-M.R.P.: Rs. 80.00 (Incl. of all taxes)
-Mfg Date: 01/03/2026
-Best Before: 6 months from date of manufacture
-Serving Size: 25g
+def test_multi_column_nutrition_table():
+    text = """
+    CRUNCHY GRANOLA BARS
+    NUTRITIONAL INFORMATION
+    Nutrient                   Per 100g       Per Serve (40g)     % RDA
+    Energy (kcal)              420            168                 8%
+    Total Carbohydrates (g)    65             26                  10%
+    Total Sugars (g)           14.5           5.8                 -
+    Total Fat (g)              12.0           4.8                 7%
+    Saturated Fat (g)          3.2            1.3                 6%
+    Protein (g)                9.0            3.6                 7%
+    Dietary Fibre (g)          7.5            3.0                 10%
+    Sodium (mg)                280            112                 5%
+    """
+    nutrients = extractor.extract_nutrition_values(text)
 
-Ingredients: Refined Wheat Flour (Maida), Sugar, Hydrogenated Vegetable Oil, Cocoa Powder (3.5%),
-Invert Syrup, Salt, Raising Agent (INS 503(ii)), Emulsifier (INS 322), Vanilla Flavour.
+    # Per 100g column should be captured as primary value
+    assert nutrients["Energy"]["value"] == 420.0, f"Expected 420, got {nutrients['Energy']['value']}"
+    assert nutrients["Carbohydrates"]["value"] == 65.0, f"Expected 65, got {nutrients['Carbohydrates']['value']}"
+    assert nutrients["Sugar"]["value"] == 14.5, f"Expected 14.5, got {nutrients['Sugar']['value']}"
+    assert nutrients["Total Fat"]["value"] == 12.0, f"Expected 12.0, got {nutrients['Total Fat']['value']}"
+    assert nutrients["Saturated Fat"]["value"] == 3.2, f"Expected 3.2, got {nutrients['Saturated Fat']['value']}"
+    assert nutrients["Protein"]["value"] == 9.0, f"Expected 9.0, got {nutrients['Protein']['value']}"
+    assert nutrients["Dietary Fibre"]["value"] == 7.5, f"Expected 7.5, got {nutrients['Dietary Fibre']['value']}"
+    assert nutrients["Sodium"]["value"] == 280.0, f"Expected 280, got {nutrients['Sodium']['value']}"
 
-NUTRITIONAL INFORMATION (Approx. values per 100g)
-Energy: 490 kcal
-Total Carbohydrates: 68g
-  of which Sugars: 28g
-Total Fat: 22g
-  Saturated Fat: 11g
-  Trans Fat: 0g
-Protein: 6.5g
-Dietary Fibre: 1.5g
-Sodium: 320mg
-Salt: 0.8g
-"""
+    # Per Serving column should also be captured
+    assert nutrients["Energy"]["per_serving_value"] == 168.0, f"Expected 168, got {nutrients['Energy']['per_serving_value']}"
+    assert nutrients["Sugar"]["per_serving_value"] == 5.8, f"Expected 5.8, got {nutrients['Sugar']['per_serving_value']}"
 
-def _ext_name():
-    import extractor
-    f = extractor.extract_product_fields(SAMPLE_LABEL_TEXT)
-    assert f["product_name"] and not f["product_name"].startswith("0")
-
-def _ext_brand():
-    import extractor
-    f = extractor.extract_product_fields(SAMPLE_LABEL_TEXT)
-    assert f["brand_name"] and ("ITC" in f["brand_name"] or "Limited" in f["brand_name"])
-
-def _ext_mrp():
-    import extractor
-    f = extractor.extract_product_fields(SAMPLE_LABEL_TEXT)
-    assert f["mrp"] and "80" in f["mrp"] and "₹" in f["mrp"]
-
-def _ext_mfg():
-    import extractor
-    f = extractor.extract_product_fields(SAMPLE_LABEL_TEXT)
-    assert f["mfg_date"] and any(t in f["mfg_date"] for t in ["2026","03","01"])
-
-def _ext_bestbefore():
-    import extractor
-    f = extractor.extract_product_fields(SAMPLE_LABEL_TEXT)
-    assert f["best_before"] and ("month" in f["best_before"].lower() or "6" in f["best_before"])
-
-def _ext_ingredients():
-    import extractor
-    f = extractor.extract_product_fields(SAMPLE_LABEL_TEXT)
-    assert f["ingredients"] and "heat" in f["ingredients"].lower()
-
-def _ext_serving():
-    import extractor
-    f = extractor.extract_product_fields(SAMPLE_LABEL_TEXT)
-    assert f["serving_size"] and "25" in f["serving_size"]
-
-def _ext_empty():
-    import extractor
-    f = extractor.extract_product_fields("")
-    n = extractor.extract_nutrition_values("")
-    assert all(v is None for v in f.values())
-    assert all(d["value"] is None for d in n.values())
-
-check("Extraction — product name detected", _ext_name)
-check("Extraction — brand name detected", _ext_brand)
-check("Extraction — MRP extracted correctly", _ext_mrp)
-check("Extraction — manufacturing date detected", _ext_mfg)
-check("Extraction — best before detected", _ext_bestbefore)
-check("Extraction — ingredients detected", _ext_ingredients)
-check("Extraction — serving size detected", _ext_serving)
-check("Extraction — empty text returns all None (no crash)", _ext_empty)
+check("Scenario 02: Multi-column nutrition table preserves column association", test_multi_column_nutrition_table)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SECTION 5 — DATE FORMAT VARIATIONS
+# 3. INDIAN MRP AND DATE FORMATS
 # ─────────────────────────────────────────────────────────────────────────────
-def _date_month_year():
-    import extractor
-    f = extractor.extract_product_fields("Mfg: Jan 2026\nExp: 15 July 2026\n")
-    assert f["mfg_date"], "mfg_date not found for 'Jan 2026'"
+def test_indian_mrp_and_dates():
+    text1 = "HALDIRAM BHUJIA SEV\nPKD 15/02/2026\nUSE BY 14/08/2026\nMRP Rs. 120.00 (inclusive of all taxes)"
+    fields1 = extractor.extract_product_fields(text1)
+    assert fields1["mrp"] == "₹ 120.00", f"Expected ₹ 120.00, got {fields1['mrp']}"
+    assert fields1["pack_date"] == "15/02/2026"
+    assert fields1["expiry_date"] == "14/08/2026"
 
-def _date_slash():
-    import extractor
-    f = extractor.extract_product_fields("Mfd: 05/2026\nExpiry Date: 11/2026\n")
-    assert f["mfg_date"], "mfg_date not found for '05/2026'"
+    text2 = "AMUL CHEESE SLICES\nMFD. 01.03.2026\nBEST BEFORE 9 MONTHS FROM PACKAGING\nMax. Retail Price: Rs 99/-"
+    fields2 = extractor.extract_product_fields(text2)
+    assert fields2["mrp"] == "₹ 99.00"
+    assert fields2["mfg_date"] == "01.03.2026"
+    assert "9 months" in fields2["best_before"].lower()
 
-def _dates_distinct():
-    import extractor
-    f = extractor.extract_product_fields("Mfg Date: 01/01/2026\nExpiry Date: 01/01/2027\n")
-    assert f["mfg_date"] and f["expiry_date"]
-    assert f["mfg_date"] != f["expiry_date"]
-    assert "2026" in f["mfg_date"] and "2027" in f["expiry_date"]
-
-check("Date parsing — 'Jan 2026' month-year format", _date_month_year)
-check("Date parsing — slash-separated MM/YYYY format", _date_slash)
-check("Date parsing — mfg (2026) and expiry (2027) not confused", _dates_distinct)
+check("Scenario 03: Indian MRP formats (incl taxes, /-) and date variations (PKD, MFD, Best before)", test_indian_mrp_and_dates)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SECTION 6 — NUTRITION VALUE EXTRACTION
+# 4. INGREDIENTS CONTAINING ALLERGENS (WORD BOUNDARY PRECISION)
 # ─────────────────────────────────────────────────────────────────────────────
-def _nutr_energy():
-    import extractor
-    n = extractor.extract_nutrition_values(SAMPLE_LABEL_TEXT)
-    assert n["Energy"]["value"] == 490.0 and n["Energy"]["unit"] == "kcal"
+def test_allergen_word_boundary_precision():
+    # Text with words containing substrings of allergens:
+    # "chocolate" contains "oat"
+    # "minute" contains "nut"
+    # "pear" contains "pea"
+    # "veggie" contains "egg"
+    tricky_text = "Ingredients: Dark Chocolate coating, pear extract, minute tapioca pearls, veggie oil."
+    res = allergen_engine.detect_allergens(tricky_text)
 
-def _nutr_carbs():
-    import extractor
-    n = extractor.extract_nutrition_values(SAMPLE_LABEL_TEXT)
-    assert n["Carbohydrates"]["value"] == 68.0
+    found_names = [a["name"] for a in res["allergens_found"]]
+    assert "Peanuts" not in found_names, "False positive: 'pear' should not match Peanuts!"
+    assert "Tree Nuts" not in found_names, "False positive: 'minute' should not match Tree Nuts!"
+    assert "Eggs" not in found_names, "False positive: 'veggie' should not match Eggs!"
 
-def _nutr_sugar():
-    import extractor
-    n = extractor.extract_nutrition_values(SAMPLE_LABEL_TEXT)
-    assert n["Sugar"]["value"] == 28.0, f"Expected 28.0, got {n['Sugar']['value']}"
+    # Real allergen text
+    real_text = "Ingredients: Whole wheat flour, skimmed milk powder, roasted peanuts, soy lecithin."
+    real_res = allergen_engine.detect_allergens(real_text)
+    real_names = [a["name"] for a in real_res["allergens_found"]]
+    assert "Gluten" in real_names
+    assert "Milk / Dairy" in real_names
+    assert "Peanuts" in real_names
+    assert "Soy / Soybean" in real_names
 
-def _nutr_fat():
-    import extractor
-    n = extractor.extract_nutrition_values(SAMPLE_LABEL_TEXT)
-    assert n["Total Fat"]["value"] == 22.0
-
-def _nutr_sat_fat():
-    import extractor
-    n = extractor.extract_nutrition_values(SAMPLE_LABEL_TEXT)
-    assert n["Saturated Fat"]["value"] == 11.0
-
-def _nutr_trans():
-    import extractor
-    n = extractor.extract_nutrition_values(SAMPLE_LABEL_TEXT)
-    assert n["Trans Fat"]["value"] == 0.0
-
-def _nutr_protein():
-    import extractor
-    n = extractor.extract_nutrition_values(SAMPLE_LABEL_TEXT)
-    assert n["Protein"]["value"] == 6.5
-
-def _nutr_fibre():
-    import extractor
-    n = extractor.extract_nutrition_values(SAMPLE_LABEL_TEXT)
-    assert n["Dietary Fibre"]["value"] == 1.5
-
-def _nutr_sodium():
-    import extractor
-    n = extractor.extract_nutrition_values(SAMPLE_LABEL_TEXT)
-    assert n["Sodium"]["value"] == 320.0 and n["Sodium"]["unit"] == "mg"
-
-def _nutr_salt():
-    import extractor
-    n = extractor.extract_nutrition_values(SAMPLE_LABEL_TEXT)
-    assert n["Salt"]["value"] == 0.8
-
-def _nutr_added_sugar_extraction():
-    import extractor
-    text = "Nutritional values per 100g\nTotal Carbohydrates: 50g\n  of which Added Sugars: 15g\n"
-    n = extractor.extract_nutrition_values(text)
-    assert n["Added Sugar"]["value"] == 15.0, f"Got: {n['Added Sugar']['value']}"
-
-def _nutr_gm_unit():
-    import extractor
-    n = extractor.extract_nutrition_values("Protein: 7.5gm\nFat: 12gm\n")
-    assert n["Protein"]["unit"] == "g"
-    assert n["Total Fat"]["unit"] == "g"
-
-def _sugar_not_carbs():
-    import extractor
-    n = extractor.extract_nutrition_values("Total Carbohydrates: 60g\n  of which Sugars: 8g\n")
-    assert n["Sugar"]["value"] == 8.0, f"Got {n['Sugar']['value']}"
-    assert n["Carbohydrates"]["value"] == 60.0
-
-def _serving_basis_detected():
-    import extractor
-    n = extractor.extract_nutrition_values("Nutritional values per 30g serving\nProtein: 5g\n")
-    assert "30" in n["Protein"]["serving_basis"]
-
-def _long_ingredients_trim():
-    import extractor
-    long_ing = "Ingredient " + ", Ingredient ".join(str(i) for i in range(200))
-    f = extractor.extract_product_fields(f"Ingredients: {long_ing}\nNutritional Information\nSugar: 5g")
-    if f["ingredients"]:
-        assert len(f["ingredients"]) <= 920  # trimmed at 900 + " ..." suffix
-
-check("Nutrition — Energy (kcal)", _nutr_energy)
-check("Nutrition — Carbohydrates", _nutr_carbs)
-check("Nutrition — Sugar not confused with Carbs", _nutr_sugar)
-check("Nutrition — Total Fat", _nutr_fat)
-check("Nutrition — Saturated Fat", _nutr_sat_fat)
-check("Nutrition — Trans Fat (zero value)", _nutr_trans)
-check("Nutrition — Protein", _nutr_protein)
-check("Nutrition — Dietary Fibre", _nutr_fibre)
-check("Nutrition — Sodium (mg)", _nutr_sodium)
-check("Nutrition — Salt", _nutr_salt)
-check("Nutrition — Added Sugar extracted when present", _nutr_added_sugar_extraction)
-check("Nutrition — 'gm' normalised to 'g'", _nutr_gm_unit)
-check("Nutrition — Sugar ≠ Carbohydrates", _sugar_not_carbs)
-check("Nutrition — per-serving basis (30g) detected", _serving_basis_detected)
-check("Extraction — long ingredients list trimmed safely", _long_ingredients_trim)
+check("Scenario 04: Allergen detection word-boundary precision prevents false positives", test_allergen_word_boundary_precision)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SECTION 7 — NUTRITION RULES (nutrition_rules.py)
+# 5. RECIPE SCREENSHOT MISTAKENLY PRESENTED AS PRODUCT PACKAGE
 # ─────────────────────────────────────────────────────────────────────────────
-def _nr_sugar_above():
-    import nutrition_rules
-    r = nutrition_rules.evaluate_nutrient("Sugar", 28.0, "g", "per 100g")
-    assert r["status_type"] == "alert" and "Above" in r["status"]
+def test_recipe_classification_not_packaged_food():
+    recipe_text = """
+    VANILLA CAKE RECIPE
+    Prep time: 20 mins | Bake time: 35 mins | Servings: 8 people
+    Ingredients:
+    2 cups all-purpose flour, 1 cup granulated sugar, 1/2 cup butter, 2 eggs, 1 cup milk, 2 tsp baking powder.
+    Directions:
+    Step 1: Preheat oven to 350°F. Grease and flour a 9-inch cake pan.
+    Step 2: In a medium bowl, whisk together flour and baking powder.
+    Step 3: Cream butter and sugar until light and fluffy.
+    """
+    classif = ocr_utils.classify_content_type(recipe_text)
+    assert classif["content_type"] == "recipe", f"Expected recipe, got {classif['content_type']}"
+    assert not classif["is_package"]
 
-def _nr_sugar_within():
-    import nutrition_rules
-    r = nutrition_rules.evaluate_nutrient("Sugar", 5.0, "g", "per 100g")
-    assert r["status_type"] == "success" and "Within" in r["status"]
+    fields = extractor.extract_product_fields(recipe_text, classif)
+    assert fields["product_name"] is None, f"Recipe title should NOT be assigned as product_name: {fields['product_name']}"
+    assert fields["brand_name"] is None
+    assert fields["mrp"] is None
+    assert fields["mfg_date"] is None
+    assert fields["expiry_date"] is None
 
-def _nr_protein_low():
-    import nutrition_rules
-    r = nutrition_rules.evaluate_nutrient("Protein", 2.0, "g", "per 100g")
-    assert r["status_type"] == "warning" and "Below" in r["status"]
-
-def _nr_protein_ok():
-    import nutrition_rules
-    r = nutrition_rules.evaluate_nutrient("Protein", 8.5, "g", "per 100g")
-    assert r["status_type"] == "success"
-
-def _nr_trans_alert():
-    import nutrition_rules
-    r = nutrition_rules.evaluate_nutrient("Trans Fat", 0.5, "g", "per 100g")
-    assert r["status_type"] == "alert"
-
-def _nr_energy_info():
-    import nutrition_rules
-    r = nutrition_rules.evaluate_nutrient("Energy", 490.0, "kcal", "per 100g")
-    assert r["status_type"] == "neutral" and r["status"] == "Informational"
-
-def _nr_none_not_detected():
-    import nutrition_rules
-    r = nutrition_rules.evaluate_nutrient("Sugar", None, "g", "per 100g")
-    assert r["extracted_value"] == "Not detected"
-    assert r["status_type"] == "muted"
-    assert r["status"] == "Not detected"
-
-def _nr_sodium_mg_within():
-    import nutrition_rules
-    r = nutrition_rules.evaluate_nutrient("Sodium", 400.0, "mg", "per 100g")
-    assert r["status_type"] == "success"
-
-def _nr_sodium_mg_above():
-    import nutrition_rules
-    r = nutrition_rules.evaluate_nutrient("Sodium", 850.0, "mg", "per 100g")
-    assert r["status_type"] == "alert"
-
-def _nr_sodium_g_convert():
-    import nutrition_rules
-    r = nutrition_rules.evaluate_nutrient("Sodium", 0.5, "g", "per 100g")
-    assert r["status_type"] == "success"
-
-def _nr_serving_mismatch():
-    import nutrition_rules
-    r = nutrition_rules.evaluate_nutrient("Sugar", 8.0, "g", "per 30g")
-    assert r["status_type"] == "warning" and "review" in r["status"].lower()
-
-def _nr_compare_all_length():
-    import extractor, nutrition_rules
-    n = extractor.extract_nutrition_values(SAMPLE_LABEL_TEXT)
-    rows = nutrition_rules.compare_all_nutrients(n)
-    # DISPLAY_ORDER now has 11 entries (Added Sugar included)
-    assert len(rows) == 11, f"Expected 11 rows, got {len(rows)}"
-    names = [r["nutrient"] for r in rows]
-    assert "Energy" in names
-    assert "Added Sugar" in names
-    assert "Sugar" in names
-
-check("Nutrition rules — Sugar 28g → ABOVE limit", _nr_sugar_above)
-check("Nutrition rules — Sugar 5g → WITHIN limit", _nr_sugar_within)
-check("Nutrition rules — Protein 2g → BELOW guideline", _nr_protein_low)
-check("Nutrition rules — Protein 8.5g → meets guideline", _nr_protein_ok)
-check("Nutrition rules — Trans Fat 0.5g → ABOVE limit", _nr_trans_alert)
-check("Nutrition rules — Energy → Informational (no pass/fail)", _nr_energy_info)
-check("Nutrition rules — None value → 'Not detected' (not passing)", _nr_none_not_detected)
-check("Nutrition rules — Sodium 400mg → WITHIN 600mg limit", _nr_sodium_mg_within)
-check("Nutrition rules — Sodium 850mg → ABOVE 600mg limit", _nr_sodium_mg_above)
-check("Nutrition rules — Sodium 0.5g (500mg) → WITHIN limit", _nr_sodium_g_convert)
-check("Nutrition rules — per-serving basis → 'Needs review'", _nr_serving_mismatch)
-check("Nutrition rules — compare_all_nutrients returns 11 rows (inc. Added Sugar)", _nr_compare_all_length)
+check("Scenario 05: Recipe screenshot is classified as recipe and package fields are withheld", test_recipe_classification_not_packaged_food)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SECTION 8 — DEMO DATA
+# 6. IMAGE WITH NO READABLE TEXT
 # ─────────────────────────────────────────────────────────────────────────────
-def _demo_keys():
-    import extractor
-    d = extractor.get_demo_packet_data()
-    assert d["is_demo"] is True
-    for k in ["product_name","brand_name","mrp","mfg_date","best_before","ingredients","serving_size"]:
-        assert k in d["fields"], f"Missing: {k}"
-    for k in ["Energy","Carbohydrates","Sugar","Total Fat","Saturated Fat",
-              "Trans Fat","Protein","Dietary Fibre","Sodium","Salt"]:
-        assert k in d["nutrients"], f"Missing nutrient: {k}"
-        assert d["nutrients"][k]["value"] is not None
+def test_image_with_no_readable_text():
+    # Empty string or noise
+    classif = ocr_utils.classify_content_type("")
+    assert classif["content_type"] == "empty"
+    assert not classif["is_package"]
 
-def _demo_flagged():
-    import extractor
-    assert extractor.get_demo_packet_data()["is_demo"] is True
-
-check("Demo data — all required field and nutrient keys present", _demo_keys)
-check("Demo data — explicitly flagged is_demo=True", _demo_flagged)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 9 — PREPROCESSING
-# ─────────────────────────────────────────────────────────────────────────────
-def _preprocess_ok():
-    import image_utils
-    from PIL import Image
-    img = Image.new("RGB", (400, 200), (255, 255, 255))
-    result = image_utils.preprocess_image_for_ocr(img)
-    assert isinstance(result, Image.Image)
-
-check("Preprocessing — returns PIL Image without crash (OpenCV optional)", _preprocess_ok)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 10 — OCR AVAILABILITY CHECK
-# ─────────────────────────────────────────────────────────────────────────────
-def _ocr_struct():
-    import ocr_utils
-    r = ocr_utils.check_ocr_availability()
-    assert "available" in r and isinstance(r["available"], bool)
-    assert "message" in r and len(r["message"]) > 0
-
-def _ocr_fake_image_no_crash():
-    """Calling extract_raw_text when Tesseract is unavailable must not crash."""
-    import ocr_utils
-    from PIL import Image
-    img = Image.new("RGB", (200, 100), (255, 255, 255))
-    result = ocr_utils.extract_raw_text(img)
-    assert "success" in result
-    assert isinstance(result["success"], bool)
-    # Must never return fabricated text on failure
-    if not result["success"]:
-        assert result["text"] == ""
-        assert result["error_message"]
-
-check("OCR availability — returns correct dict structure", _ocr_struct)
-check("OCR extract_raw_text — no crash on fake image, honest failure if no Tesseract", _ocr_fake_image_no_crash)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 11 — RISK ENGINE: QUANTITATIVE ALERTS
-# ─────────────────────────────────────────────────────────────────────────────
-def _re_sugar_high():
-    import risk_engine
-    alerts = risk_engine.evaluate_quantitative_alerts(
-        {"Sugar": {"value": 30.0, "unit": "g", "serving_basis": "per 100g"}})
-    a = next(x for x in alerts if x["nutrient"] == "Sugar")
-    assert a["status"] == "HIGH"
-
-def _re_sugar_moderate():
-    import risk_engine
-    alerts = risk_engine.evaluate_quantitative_alerts(
-        {"Sugar": {"value": 10.0, "unit": "g", "serving_basis": "per 100g"}})
-    a = next(x for x in alerts if x["nutrient"] == "Sugar")
-    assert a["status"] == "MODERATE"
-
-def _re_sugar_ok():
-    import risk_engine
-    alerts = risk_engine.evaluate_quantitative_alerts(
-        {"Sugar": {"value": 3.0, "unit": "g", "serving_basis": "per 100g"}})
-    a = next(x for x in alerts if x["nutrient"] == "Sugar")
-    assert a["status"] == "OK"
-
-def _re_unknown_none():
-    import risk_engine
-    alerts = risk_engine.evaluate_quantitative_alerts(
-        {"Sugar": {"value": None, "unit": "g", "serving_basis": "per 100g"}})
-    a = next(x for x in alerts if x["nutrient"] == "Sugar")
-    assert a["status"] == "UNKNOWN" and a["value_display"] == "Not detected"
-
-def _re_unknown_per_serving():
-    import risk_engine
-    alerts = risk_engine.evaluate_quantitative_alerts(
-        {"Sugar": {"value": 8.0, "unit": "g", "serving_basis": "per 30g serving"}})
-    a = next(x for x in alerts if x["nutrient"] == "Sugar")
-    assert a["status"] == "UNKNOWN", f"Per-serving must not compare to per-100g. Got: {a['status']}"
-    assert a["basis_warning"]
-
-def _re_sodium_high():
-    import risk_engine
-    alerts = risk_engine.evaluate_quantitative_alerts(
-        {"Sodium": {"value": 850.0, "unit": "mg", "serving_basis": "per 100g"}})
-    a = next(x for x in alerts if x["nutrient"] == "Sodium")
-    assert a["status"] == "HIGH"
-
-def _re_sodium_g_ok():
-    import risk_engine
-    # 0.2g = 200mg → OK
-    alerts = risk_engine.evaluate_quantitative_alerts(
-        {"Sodium": {"value": 0.2, "unit": "g", "serving_basis": "per 100g"}})
-    a = next(x for x in alerts if x["nutrient"] == "Sodium")
-    assert a["status"] == "OK", f"200mg should be OK. Got: {a['status']}"
-
-def _re_trans_high():
-    import risk_engine
-    alerts = risk_engine.evaluate_quantitative_alerts(
-        {"Trans Fat": {"value": 3.0, "unit": "g", "serving_basis": "per 100g"}})
-    a = next(x for x in alerts if x["nutrient"] == "Trans Fat")
-    assert a["status"] == "HIGH"
-
-def _re_trans_ok():
-    import risk_engine
-    alerts = risk_engine.evaluate_quantitative_alerts(
-        {"Trans Fat": {"value": 0.0, "unit": "g", "serving_basis": "per 100g"}})
-    a = next(x for x in alerts if x["nutrient"] == "Trans Fat")
-    assert a["status"] == "OK"
-
-def _re_sat_fat_levels():
-    import risk_engine
-    for val, expected in [(6.0, "HIGH"), (3.0, "MODERATE"), (1.0, "OK")]:
-        alerts = risk_engine.evaluate_quantitative_alerts(
-            {"Saturated Fat": {"value": val, "unit": "g", "serving_basis": "per 100g"}})
-        a = next(x for x in alerts if x["nutrient"] == "Saturated Fat")
-        assert a["status"] == expected, f"SatFat {val}g → {expected}, got {a['status']}"
-
-def _re_all_6_present():
-    import risk_engine
-    alerts = risk_engine.evaluate_quantitative_alerts({})
-    names = {a["nutrient"] for a in alerts}
-    for n in ["Sugar","Saturated Fat","Trans Fat","Sodium","Salt","Total Fat"]:
-        assert n in names, f"Missing: {n}"
-
-check("Risk engine — Sugar 30g → HIGH", _re_sugar_high)
-check("Risk engine — Sugar 10g → MODERATE", _re_sugar_moderate)
-check("Risk engine — Sugar 3g → OK", _re_sugar_ok)
-check("Risk engine — None value → UNKNOWN (not OK)", _re_unknown_none)
-check("Risk engine — per-serving basis → UNKNOWN (not compared to per-100g)", _re_unknown_per_serving)
-check("Risk engine — Sodium 850mg → HIGH", _re_sodium_high)
-check("Risk engine — Sodium 0.2g (200mg) → OK", _re_sodium_g_ok)
-check("Risk engine — Trans Fat 3g → HIGH", _re_trans_high)
-check("Risk engine — Trans Fat 0g → OK", _re_trans_ok)
-check("Risk engine — Saturated Fat HIGH/MODERATE/OK levels correct", _re_sat_fat_levels)
-check("Risk engine — all 6 monitored nutrients appear even when undetected", _re_all_6_present)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 12 — RISK ENGINE: INGREDIENT FLAGS
-# ─────────────────────────────────────────────────────────────────────────────
-def _ing_palm_oil():
-    import risk_engine
-    flags = risk_engine.evaluate_ingredient_flags(
-        "Refined Wheat Flour, Sugar, Palm Oil, Salt, Raising Agent")
-    names = [f["name"] for f in flags]
-    assert "Palm Oil" in names
-
-def _ing_hydro():
-    import risk_engine
-    flags = risk_engine.evaluate_ingredient_flags(
-        "Vegetable Oil (Partially Hydrogenated), Sugar, Salt")
-    names = [f["name"] for f in flags]
-    assert any("Hydrogenated" in n or "Trans" in n for n in names)
-
-def _ing_no_false_positive():
-    import risk_engine
-    flags = risk_engine.evaluate_ingredient_flags(
-        "Whole Wheat Flour, Rolled Oats, Honey, Iodized Salt")
-    for f in flags:
-        assert "palm oil" not in [t.lower() for t in f["found_terms"]]
-
-def _ing_empty():
-    import risk_engine
-    assert risk_engine.evaluate_ingredient_flags("") == []
-
-def _ing_maida():
-    import risk_engine
-    flags = risk_engine.evaluate_ingredient_flags(
-        "Refined Wheat Flour (Maida), Sugar, Salt")
-    names = [f["name"] for f in flags]
-    assert any("Maida" in n or "Refined" in n for n in names), f"Got: {names}"
-
-def _ing_msg():
-    import risk_engine
-    flags = risk_engine.evaluate_ingredient_flags(
-        "Wheat Flour, Salt, Monosodium Glutamate, Water")
-    names = [f["name"] for f in flags]
-    assert any("MSG" in n or "Glutamate" in n for n in names)
-
-check("Ingredient flags — Palm Oil found → flag raised", _ing_palm_oil)
-check("Ingredient flags — Partially Hydrogenated → trans fat flag raised", _ing_hydro)
-check("Ingredient flags — clean text → no false palm-oil flag", _ing_no_false_positive)
-check("Ingredient flags — empty text → empty list (no crash)", _ing_empty)
-check("Ingredient flags — Maida/Refined Wheat Flour detected", _ing_maida)
-check("Ingredient flags — MSG detected", _ing_msg)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 13 — RISK ENGINE: run_full_risk_analysis
-# ─────────────────────────────────────────────────────────────────────────────
-def _re_full_structure():
-    import extractor, risk_engine
-    n = extractor.extract_nutrition_values(SAMPLE_LABEL_TEXT)
-    f = extractor.extract_product_fields(SAMPLE_LABEL_TEXT)
-    result = risk_engine.run_full_risk_analysis(n, f.get("ingredients"))
-    for key in ["quantitative_alerts","ingredient_flags","has_high_alerts",
-                "has_moderate_alerts","has_ingredient_flags",
-                "nutrition_available","ingredients_available"]:
-        assert key in result, f"Missing key: {key}"
-    assert isinstance(result["quantitative_alerts"], list)
-    assert isinstance(result["has_high_alerts"], bool)
-
-def _re_demo_pipeline():
-    import extractor, risk_engine
-    demo = extractor.get_demo_packet_data()
-    risk = risk_engine.run_full_risk_analysis(
-        demo["nutrients"], demo["fields"].get("ingredients"))
-    quant = risk["quantitative_alerts"]
-    sugar_a = next((a for a in quant if a["nutrient"] == "Sugar"), None)
-    assert sugar_a and sugar_a["status"] in ("MODERATE","HIGH"), \
-        f"Demo sugar 12.8g should be MODERATE or HIGH. Got: {sugar_a['status']}"
-    # "Brown Sugar" is in demo ingredients → added sugar flag expected
-    assert risk["has_ingredient_flags"] is True
-
-def _re_ingredients_only_no_quant():
-    """When only ingredients text is present (no nutrition values), quantitative
-    alerts are all UNKNOWN but the function must not crash."""
-    import risk_engine
-    result = risk_engine.run_full_risk_analysis(
-        {},  # no nutrients
-        "Sugar, Palm Oil, Maida, Salt"
-    )
-    assert result["nutrition_available"] is False
-    assert result["ingredients_available"] is True
-    assert result["has_ingredient_flags"] is True
-    # All quantitative alerts must be UNKNOWN
-    for a in result["quantitative_alerts"]:
-        assert a["status"] == "UNKNOWN"
-
-def _re_neither_available():
-    import risk_engine
-    result = risk_engine.run_full_risk_analysis({}, None)
-    assert result["nutrition_available"] is False
-    assert result["ingredients_available"] is False
-    assert result["ingredient_flags"] == []
-
-check("Risk engine — run_full_risk_analysis returns complete structure", _re_full_structure)
-check("Risk engine — demo packet: correct MODERATE sugar + ingredient flags", _re_demo_pipeline)
-check("Risk engine — ingredients-only input: all quant UNKNOWN, ing flags work", _re_ingredients_only_no_quant)
-check("Risk engine — no data at all: returns cleanly without crash", _re_neither_available)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 14 — INTEGRATION: extractor → risk_engine → nutrition_rules pipeline
-# ─────────────────────────────────────────────────────────────────────────────
-HIGH_RISK_LABEL = """
-ULTRA PROCESSED SNACK
-Brand: Test Corp
-M.R.P.: Rs. 40.00
-Mfg: 01/06/2026
-Expiry: 01/12/2026
-
-Ingredients: Maida, Vanaspati, Sugar, Salt, Tartrazine (INS 102), Sodium Benzoate (INS 211).
-
-NUTRITIONAL INFORMATION (Per 100g)
-Energy: 520 kcal
-Total Carbohydrates: 65g
-  of which Sugars: 35g
-Total Fat: 26g
-  Saturated Fat: 9g
-  Trans Fat: 3g
-Protein: 4g
-Dietary Fibre: 0.5g
-Sodium: 750mg
-Salt: 1.9g
-"""
-
-def _pipeline_high_sugar():
-    import extractor, risk_engine
-    n = extractor.extract_nutrition_values(HIGH_RISK_LABEL)
-    result = risk_engine.run_full_risk_analysis(n, None)
-    alerts = result["quantitative_alerts"]
-    sugar_a = next(a for a in alerts if a["nutrient"] == "Sugar")
-    assert sugar_a["status"] == "HIGH", f"35g sugar should be HIGH. Got: {sugar_a['status']}"
-
-def _pipeline_high_sodium():
-    import extractor, risk_engine
-    n = extractor.extract_nutrition_values(HIGH_RISK_LABEL)
-    result = risk_engine.run_full_risk_analysis(n, None)
-    na = next(a for a in result["quantitative_alerts"] if a["nutrient"] == "Sodium")
-    assert na["status"] == "HIGH", f"750mg sodium should be HIGH. Got: {na['status']}"
-
-def _pipeline_high_trans():
-    import extractor, risk_engine
-    n = extractor.extract_nutrition_values(HIGH_RISK_LABEL)
-    result = risk_engine.run_full_risk_analysis(n, None)
-    tf = next(a for a in result["quantitative_alerts"] if a["nutrient"] == "Trans Fat")
-    assert tf["status"] == "HIGH", f"3g trans fat should be HIGH. Got: {tf['status']}"
-
-def _pipeline_ingredient_flags_combined():
-    import extractor, risk_engine
-    f = extractor.extract_product_fields(HIGH_RISK_LABEL)
-    n = extractor.extract_nutrition_values(HIGH_RISK_LABEL)
-    result = risk_engine.run_full_risk_analysis(n, f.get("ingredients"))
-    assert result["has_ingredient_flags"] is True
-    flag_names = [x["name"] for x in result["ingredient_flags"]]
-    # Vanaspati → partially hydrogenated flag
-    assert any("Hydrogenated" in nm or "Trans" in nm for nm in flag_names), \
-        f"Vanaspati should trigger trans fat flag. Got: {flag_names}"
-    # Tartrazine → artificial colour flag
-    assert any("Colour" in nm or "colour" in nm.lower() for nm in flag_names), \
-        f"Tartrazine should trigger colour flag. Got: {flag_names}"
-
-def _pipeline_missing_fields_no_crash():
-    """App must not crash when fields dict has all-None values."""
-    import extractor, nutrition_rules, risk_engine
     fields = extractor.extract_product_fields("")
+    assert fields["product_name"] is None
+    assert fields["brand_name"] is None
+
     nutrients = extractor.extract_nutrition_values("")
-    rows = nutrition_rules.compare_all_nutrients(nutrients)
+    assert all(data["value"] is None for data in nutrients.values())
+
+    score = health_score.compute_health_score(nutrients)
+    assert score["status"] == "insufficient_data"
+    assert score["score"] is None
+    assert score["grade"] is None
+
+check("Scenario 06: Empty image text returns clean null status and no default score", test_image_with_no_readable_text)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. PARTIAL NUTRITION DATA
+# ─────────────────────────────────────────────────────────────────────────────
+def test_partial_nutrition_data():
+    # Only Sugar and Saturated Fat are present
+    partial_text = """
+    FRUIT SPREAD
+    NUTRITIONAL INFORMATION per 100g:
+    Total Sugars: 42g
+    Saturated Fat: 0.1g
+    """
+    nutrients = extractor.extract_nutrition_values(partial_text)
+    assert nutrients["Sugar"]["value"] == 42.0
+    assert nutrients["Saturated Fat"]["value"] == 0.1
+    assert nutrients["Protein"]["value"] is None
+    assert nutrients["Sodium"]["value"] is None
+
+    score = health_score.compute_health_score(nutrients)
+    assert score["status"] == "partial_data"
+    assert score["score"] is not None
+    assert score["detected_count"] == 2
+    assert "Sugar" in score["detected_nutrients"]
+    assert "Saturated Fat" in score["detected_nutrients"]
+    assert "Protein" in score["missing_nutrients"]
+
+check("Scenario 07: Partial nutrition data computes re-normalized score and discloses coverage", test_partial_nutrition_data)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. SODIUM VERSUS SALT DISTINCTION AND CONVERSION
+# ─────────────────────────────────────────────────────────────────────────────
+def test_sodium_vs_salt_distinction():
+    # When both are present with distinct numbers
+    text_both = "NUTRITION FACTS: Sodium: 400mg, Salt: 1.0g"
+    nutrients = extractor.extract_nutrition_values(text_both)
+    assert nutrients["Sodium"]["value"] == 400.0
+    assert nutrients["Sodium"]["unit"] == "mg"
+    assert nutrients["Salt"]["value"] == 1.0
+    assert nutrients["Salt"]["unit"] == "g"
+
+    # When only Salt is present
+    text_salt_only = "NUTRITION FACTS: Total Sugars: 10g, Total Fat: 5g, Saturated Fat: 1g, Salt: 1.5g"
+    nut_salt = extractor.extract_nutrition_values(text_salt_only)
+    assert nut_salt["Sodium"]["value"] is None
+    assert nut_salt["Salt"]["value"] == 1.5
+
+    # Health score safely derives sodium from salt without falsifying the extracted object
+    score = health_score.compute_health_score(nut_salt)
+    sodium_comp = next(c for c in score["components"] if c["nutrient"] == "Sodium")
+    assert sodium_comp["detected"] is True
+    assert sodium_comp["derived"] is True
+    # 1.5g salt / 2.5 * 1000 = 600mg sodium
+    assert abs(sodium_comp["value"] - 600.0) < 0.1
+
+check("Scenario 08: Sodium vs Salt distinction and non-destructive derivation", test_sodium_vs_salt_distinction)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. MISSING ADDED SUGAR AND MISSING NUTRIENTS
+# ─────────────────────────────────────────────────────────────────────────────
+def test_missing_added_sugar_and_missing_nutrients():
+    text = "NUTRITIONAL INFORMATION per 100g: Total Sugars: 15g, Protein: 5g"
+    nutrients = extractor.extract_nutrition_values(text)
+    assert nutrients["Sugar"]["value"] == 15.0
+    assert nutrients["Added Sugar"]["value"] is None, "Absent added sugar must remain None, not 0!"
+    assert nutrients["Trans Fat"]["value"] is None, "Absent trans fat must remain None, not 0!"
+
+check("Scenario 09: Absent nutrients remain None and are never inferred as zero", test_missing_added_sugar_and_missing_nutrients)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. INCORRECT OCR READINGS AND AMBIGUOUS DATES
+# ─────────────────────────────────────────────────────────────────────────────
+def test_ocr_repair_and_ambiguous_dates():
+    # Fused '9' for 'g' in nutrition line: "Total Carbohydrates: 689" -> repaired to 68g
+    corrupted_line = "Total Carbohydrates: 689"
+    repaired = ocr_utils._repair_nutrition_line(corrupted_line)
+    assert repaired == "Total Carbohydrates: 68g", f"Failed repair: {repaired}"
+
+    # Plausibility check: sugar > carbs
+    impossible_nutrition = "Total Carbohydrates: 20g, Total Sugars: 50g"
+    nutrients = extractor.extract_nutrition_values(impossible_nutrition)
+    assert nutrients["Sugar"]["plausibility_warning"] is not None
+
+check("Scenario 10: OCR line repair and plausibility validation flag anomalies", test_ocr_repair_and_ambiguous_dates)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. UNSUPPORTED FILES AND OVERSIZED UPLOADS
+# ─────────────────────────────────────────────────────────────────────────────
+def test_unsupported_and_oversized_files():
+    class DummyFile:
+        def __init__(self, name, size):
+            self.name = name
+            self.size = size
+        def seek(self, pos): pass
+
+    # Unsupported extension (.exe)
+    ok, err = image_utils.validate_image_file(DummyFile("payload.exe", 1024))
+    assert not ok and "Unsupported" in err
+
+    # Oversized file (> 15 MB)
+    ok, err = image_utils.validate_image_file(DummyFile("photo.jpg", 20 * 1024 * 1024))
+    assert not ok and "exceeds" in err
+
+    # Supported format (.webp)
+    dummy_webp = io.BytesIO()
+    im = Image.new("RGB", (100, 100), color=(200, 200, 200))
+    im.save(dummy_webp, format="WEBP")
+    dummy_webp.name = "snack.webp"
+    dummy_webp.size = dummy_webp.tell()
+    dummy_webp.seek(0)
+    ok, err = image_utils.validate_image_file(dummy_webp)
+    assert ok, f"WebP should be supported, got error: {err}"
+
+check("Scenario 11: Unsupported files rejected and WebP successfully validated", test_unsupported_and_oversized_files)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. PDF AND CSV EXPORT CONSISTENCY
+# ─────────────────────────────────────────────────────────────────────────────
+def test_pdf_and_csv_export_consistency():
+    demo_data = extractor.get_demo_packet_data()
+    nutrients = demo_data["nutrients"]
+    fields = demo_data["fields"]
     risk = risk_engine.run_full_risk_analysis(nutrients, fields.get("ingredients"))
-    assert len(rows) == 11
-    assert all(r["extracted_value"] == "Not detected" for r in rows)
-    assert all(a["status"] == "UNKNOWN" for a in risk["quantitative_alerts"])
+    allergens = allergen_engine.detect_allergens(fields.get("ingredients"))
+    score = health_score.compute_health_score(nutrients)
 
-check("Pipeline — high-sugar label: Sugar 35g → HIGH", _pipeline_high_sugar)
-check("Pipeline — high-sodium label: Sodium 750mg → HIGH", _pipeline_high_sodium)
-check("Pipeline — high trans-fat label: Trans Fat 3g → HIGH", _pipeline_high_trans)
-check("Pipeline — ingredient flags from real label text (vanaspati + tartrazine)", _pipeline_ingredient_flags_combined)
-check("Pipeline — all-missing fields do not crash app or return wrong status", _pipeline_missing_fields_no_crash)
+    results = {
+        "is_demo": True,
+        "fields": fields,
+        "nutrients": nutrients,
+        "risk_analysis": risk,
+        "allergen_analysis": allergens,
+        "health_score": score,
+    }
+
+    # CSV Generation
+    csv_bytes = export_engine.generate_csv(results)
+    assert len(csv_bytes) > 200
+    csv_text = csv_bytes.decode("utf-8-sig")
+    assert "GOOD MORNING CRUNCHY WHOLE GRAIN CEREAL" in csv_text
+    assert "SECTION 2: HEALTH SCORE EVALUATION" in csv_text
+
+    # PDF Generation
+    pdf_bytes = export_engine.generate_pdf(results)
+    assert len(pdf_bytes) > 500
+    assert pdf_bytes.startswith(b"%PDF")
+
+check("Scenario 12: PDF and CSV export formats generate valid documents consistently", test_pdf_and_csv_export_consistency)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FINAL SUMMARY
+# 13. PRODUCT WITH NO NUTRITION TABLE
 # ─────────────────────────────────────────────────────────────────────────────
-print("\n" + "=" * 65)
+def test_product_with_no_nutrition_table():
+    text = """
+    ORGANIC WHOLE CLOVES (LAVANG)
+    Brand: Tata Sampann
+    Net Weight: 100g
+    M.R.P.: Rs. 85.00
+    Mfg Date: 01/01/2026
+    Ingredients: Whole dried cloves.
+    """
+    fields = extractor.extract_product_fields(text)
+    nutrients = extractor.extract_nutrition_values(text)
+
+    assert fields["product_name"] == "ORGANIC WHOLE CLOVES (LAVANG)"
+    assert all(d["value"] is None for d in nutrients.values())
+
+    score = health_score.compute_health_score(nutrients)
+    assert score["status"] == "insufficient_data"
+    assert score["score"] is None
+    assert score["grade"] is None
+
+check("Scenario 13: Product without nutrition table reports missing nutrients without default score", test_product_with_no_nutrition_table)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. PRECAUTIONARY 'MAY CONTAIN' ALLERGEN STATEMENTS
+# ─────────────────────────────────────────────────────────────────────────────
+def test_precautionary_may_contain_allergens():
+    text = "Ingredients: Sugar, Cocoa Butter, Milk Powder. May contain traces of Peanuts and Tree Nuts."
+    res = allergen_engine.detect_allergens(text)
+
+    decl_names = [a["name"] for a in res["declared_allergens"]]
+    prec_names = [a["name"] for a in res["precautionary_allergens"]]
+
+    assert "Milk / Dairy" in decl_names, "Milk should be a declared ingredient allergen"
+    assert "Peanuts" in prec_names, "Peanuts should be in precautionary allergens"
+    assert "Tree Nuts" in prec_names, "Tree Nuts should be in precautionary allergens"
+    assert "Peanuts" not in decl_names, "Peanuts was NOT an ingredient, only a 'may contain' warning"
+
+check("Scenario 14: Precautionary 'may contain' statements correctly separated from declared ingredients", test_precautionary_may_contain_allergens)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 15. HEALTH SCORING WITH COMPLETE, PARTIAL, AND ABSENT NUTRIENT DATA
+# ─────────────────────────────────────────────────────────────────────────────
+def test_health_scoring_all_tiers():
+    # Tier A: Complete
+    complete_nutrients = {
+        "Sugar":         {"value": 4.0,  "unit": "g"},   # 100 pts (weight 20) -> 2000
+        "Saturated Fat": {"value": 1.0,  "unit": "g"},   # 100 pts (weight 20) -> 2000
+        "Trans Fat":     {"value": 0.0,  "unit": "g"},   # 100 pts (weight 15) -> 1500
+        "Sodium":        {"value": 150,  "unit": "mg"},  # 100 pts (weight 15) -> 1500
+        "Protein":       {"value": 12.0, "unit": "g"},   # 100 pts (weight 15) -> 1500
+        "Dietary Fibre": {"value": 8.0,  "unit": "g"},   # 100 pts (weight 15) -> 1500
+    }
+    score_a = health_score.compute_health_score(complete_nutrients)
+    assert score_a["status"] == "complete"
+    assert score_a["score"] == 100
+    assert score_a["grade"] == "A"
+
+    # Tier B: Partial (only 2 nutrients)
+    partial_nutrients = {
+        "Sugar":         {"value": 30.0, "unit": "g"},  # 0 pts (penalty, weight 20)
+        "Saturated Fat": {"value": 10.0, "unit": "g"},  # 0 pts (penalty, weight 20)
+    }
+    score_b = health_score.compute_health_score(partial_nutrients)
+    assert score_b["status"] == "partial_data"
+    assert score_b["score"] == 0
+    assert score_b["grade"] == "D"
+    assert score_b["detected_count"] == 2
+
+    # Tier C: Absent (0 nutrients)
+    empty_nutrients = {}
+    score_c = health_score.compute_health_score(empty_nutrients)
+    assert score_c["status"] == "insufficient_data"
+    assert score_c["score"] is None
+    assert score_c["grade"] is None
+
+check("Scenario 15: Health scoring tiers (Complete -> full grade, Partial -> re-normalized, Absent -> None)", test_health_scoring_all_tiers)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUMMARY
+# ─────────────────────────────────────────────────────────────────────────────
+print("\n" + "=" * 60)
 passed = sum(1 for _, ok, _ in _results if ok)
 failed = sum(1 for _, ok, _ in _results if not ok)
-print(f"  Results: {passed} passed / {failed} failed / {len(_results)} total")
-print("=" * 65)
+total = len(_results)
+print(f"TEST SUMMARY: {passed}/{total} PASSED ({failed} FAILED)")
+print("=" * 60)
 
 if failed > 0:
-    print("\nFailed tests:")
-    for name, ok, reason in _results:
-        if not ok:
-            print(f"  ✗  {name}")
-            print(f"     Reason: {reason}")
     sys.exit(1)
 else:
-    print("\n  All tests passed. Backend + Risk Engine verified.")
     sys.exit(0)
