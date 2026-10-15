@@ -153,7 +153,8 @@ def render_navbar():
 
     # Quick nav row (only on non-landing screens)
     if current != "landing":
-        n1, n2, n3, _ = st.columns([1.2, 1.2, 1.2, 6])
+        nav_cols = st.columns([1.2, 1.2, 1.2, 6])
+        n1, n2, n3, _ = nav_cols[0], nav_cols[1], nav_cols[2], nav_cols[3]
         with n1:
             if st.button("🏠 Home", key="nav_home", use_container_width=True):
                 go_to_screen("landing")
@@ -501,7 +502,8 @@ Supports JPG, JPEG, and PNG packet labels up to 10MB.
 # ==============================================================================
 def render_screen_3_results():
     # Top nav
-    top_col1, top_col2, top_col3, _ = st.columns([1.2, 1.2, 1.2, 5])
+    top_cols = st.columns([1.2, 1.2, 1.2, 5])
+    top_col1, top_col2, top_col3, _ = top_cols[0], top_cols[1], top_cols[2], top_cols[3]
     with top_col1:
         if st.button("← Scan Another", key="btn_scan_another"):
             go_to_screen("upload")
@@ -561,14 +563,14 @@ font-size:0.8rem; color:#9AA7B5; margin-top:6px;">
 </div>""", unsafe_allow_html=True)
 
     # ── Telemetry row 1 ───────────────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
-    for col, label, icon, val in [
-        (c1, "MRP / PRICE",   "💳", p_mrp),
-        (c2, "MFG DATE",      "🏭", p_mfg),
-        (c3, "PACK DATE",     "📦", p_pack),
-        (c4, "EXPIRY DATE",   "⏳", p_exp),
-    ]:
-        with col:
+    tel_cols1 = st.columns(4)
+    for i, (label, icon, val) in enumerate([
+        ("MRP / PRICE",   "💳", p_mrp),
+        ("MFG DATE",      "🏭", p_mfg),
+        ("PACK DATE",     "📦", p_pack),
+        ("EXPIRY DATE",   "⏳", p_exp),
+    ]):
+        with tel_cols1[i]:
             st.markdown(f"""<div class="telemetry-card">
 <div class="telemetry-label">{icon} {label}</div>
 <div class="telemetry-value">{val}</div>
@@ -577,16 +579,16 @@ font-size:0.8rem; color:#9AA7B5; margin-top:6px;">
     st.write("")
 
     # ── Telemetry row 2 ───────────────────────────────────────────────────────
-    d1, d2, d3, d4 = st.columns(4)
+    tel_cols2 = st.columns(4)
     ing_count = len(p_ing.split(",")) if fields.get("ingredients") else 0
-    for col, label, icon, val in [
-        (d1, "BEST BEFORE",       "📅", p_best),
-        (d2, "SERVING SIZE",      "🥣", p_serving),
-        (d3, "BRAND",             "🏷️", p_brand),
-        (d4, "INGREDIENTS COUNT", "🌱",
+    for i, (label, icon, val) in enumerate([
+        ("BEST BEFORE",       "📅", p_best),
+        ("SERVING SIZE",      "🥣", p_serving),
+        ("BRAND",             "🏷️", p_brand),
+        ("INGREDIENTS COUNT", "🌱",
          f"{ing_count} detected" if ing_count else "Not detected"),
-    ]:
-        with col:
+    ]):
+        with tel_cols2[i]:
             st.markdown(f"""<div class="telemetry-card">
 <div class="telemetry-label">{icon} {label}</div>
 <div class="telemetry-value" style="font-size:1rem;">{val}</div>
@@ -622,8 +624,8 @@ font-weight:700; color:#FFFFFF; margin-bottom:14px; display:flex; align-items:ce
 
     evaluation_rows = nutrition_rules.compare_all_nutrients(nutrients)
 
-    # 5-column metric cards — row A
-    nc1, nc2, nc3, nc4, nc5 = st.columns(5)
+    # 5-column metric cards — row A (nutrients 0-4)
+    cols_a = st.columns(5)
     for idx, row in enumerate(evaluation_rows[:5]):
         st_type = row["status_type"]
         badge_class = f"status-{st_type}" if st_type in ["success","alert","warning","neutral"] else "status-muted"
@@ -636,7 +638,7 @@ font-weight:700; color:#FFFFFF; margin-bottom:14px; display:flex; align-items:ce
             "#34D399" if st_type == "success" else
             "#FBBF24" if st_type == "warning" else "#F1F5F9"
         )
-        with [nc1, nc2, nc3, nc4, nc5][idx]:
+        with cols_a[idx]:
             st.markdown(f"""<div class="nutrient-metric-box">
 <div style="font-family:'JetBrains Mono',monospace; font-size:0.72rem;
 color:#A7F3D0; font-weight:700; text-transform:uppercase;">{row['nutrient']}</div>
@@ -648,9 +650,9 @@ color:#9AA7B5; margin-bottom:10px;">BENCHMARK: {row['threshold']}</div>
 
     st.write("")
 
-    # 5-column metric cards — row B
-    na1, na2, na3, na4, na5 = st.columns(5)
-    for idx, row in enumerate(evaluation_rows[5:]):
+    # 5-column metric cards — row B (nutrients 5-9)
+    cols_b = st.columns(5)
+    for idx, row in enumerate(evaluation_rows[5:10]):
         st_type = row["status_type"]
         badge_class = f"status-{st_type}" if st_type in ["success","alert","warning","neutral"] else "status-muted"
         val_display = (
@@ -662,7 +664,7 @@ color:#9AA7B5; margin-bottom:10px;">BENCHMARK: {row['threshold']}</div>
             "#34D399" if st_type == "success" else
             "#FBBF24" if st_type == "warning" else "#F1F5F9"
         )
-        with [na1, na2, na3, na4, na5][idx]:
+        with cols_b[idx]:
             st.markdown(f"""<div class="nutrient-metric-box">
 <div style="font-family:'JetBrains Mono',monospace; font-size:0.72rem;
 color:#A7F3D0; font-weight:700; text-transform:uppercase;">{row['nutrient']}</div>
