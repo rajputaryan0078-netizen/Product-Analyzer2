@@ -33,11 +33,22 @@ _WINDOWS_TESSERACT_PATHS = [
     r"C:\tesseract\tesseract.exe",
 ]
 
-if PYTESSERACT_AVAILABLE and os.name == "nt":
-    for _candidate in _WINDOWS_TESSERACT_PATHS:
-        if os.path.isfile(_candidate):
-            pytesseract.pytesseract.tesseract_cmd = _candidate
-            break
+_LINUX_TESSERACT_PATHS = [
+    "/usr/bin/tesseract",
+    "/usr/local/bin/tesseract",
+]
+
+if PYTESSERACT_AVAILABLE:
+    if os.name == "nt":
+        for _candidate in _WINDOWS_TESSERACT_PATHS:
+            if os.path.isfile(_candidate):
+                pytesseract.pytesseract.tesseract_cmd = _candidate
+                break
+    else:
+        for _candidate in _LINUX_TESSERACT_PATHS:
+            if os.path.isfile(_candidate):
+                pytesseract.pytesseract.tesseract_cmd = _candidate
+                break
 
 
 # ── OCR text normalisation ───────────────────────────────────────────────────
@@ -236,21 +247,29 @@ def check_ocr_availability() -> Dict[str, Any]:
             "message": "OCR engine is ready and active."
         }
     except pytesseract.TesseractNotFoundError:
+        if os.name == "nt":
+            install_msg = (
+                "Tesseract OCR is not installed or could not be found.\n\n"
+                "Windows installation steps:\n"
+                "1. Download from: https://github.com/UB-Mannheim/tesseract/wiki\n"
+                "   (choose tesseract-ocr-w64-setup-5.x.x.exe for 64-bit Windows)\n"
+                "2. Install to: C:\\Program Files\\Tesseract-OCR\\\n"
+                "3. Restart your terminal after installation.\n\n"
+                "You can still use 'Sample Demo Packet' on the landing page."
+            )
+        else:
+            install_msg = (
+                "Tesseract OCR is not installed or could not be found.\n\n"
+                "Linux installation:\n"
+                "  sudo apt-get install tesseract-ocr tesseract-ocr-eng\n\n"
+                "macOS installation:\n"
+                "  brew install tesseract\n\n"
+                "You can still use 'Sample Demo Packet' on the landing page."
+            )
         return {
             "available": False,
             "engine": "Tesseract OCR",
-            "message": (
-                "Tesseract OCR is not installed or could not be found.\n\n"
-                "Windows installation steps:\n"
-                "1. Download the installer from:\n"
-                "   https://github.com/UB-Mannheim/tesseract/wiki\n"
-                "   (choose tesseract-ocr-w64-setup-5.x.x.exe for 64-bit Windows)\n"
-                "2. Run the installer — keep the default install path:\n"
-                "   C:\\Program Files\\Tesseract-OCR\\\n"
-                "3. Restart your terminal / VS Code after installation.\n\n"
-                "You can still use 'Sample Demo Packet' on the landing page to see\n"
-                "the full analysis flow without Tesseract installed."
-            )
+            "message": install_msg,
         }
     except Exception as exc:
         return {
