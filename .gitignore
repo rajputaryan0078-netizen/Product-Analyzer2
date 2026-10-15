@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Logs / diagnostics
+*.log
+diag_out*.txt
+diag1.txt
+http_check.txt
+pip2.txt
+pkg_check.txt
+test_final*.txt
+
+# Images (uploaded at runtime — not part of source)
+*.lnk
+landing_verified.png
+
+# Scratch
+scratch/
